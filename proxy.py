@@ -15,6 +15,8 @@ parser = argparse.ArgumentParser(description='mDNS Discovery Proxy')
 parser.add_argument('domain', type=str, help='Domain name to handle')
 parser.add_argument('port', type=int, nargs='?', default=35353, help='Port number to listen on (default: 35353)')
 
+parser.add_argument('--interface', type=str, default='::', help='Interface to listen on for incoming unicast DNS queries (default: ::)')
+
 parser.add_argument('--ttl', type=int, default=10, help='DNS TTL (default: 10)')
 parser.add_argument('--timeout', type=int, default=2, help='Timeout (default: 2)')
 parser.add_argument('--allow-ranges', nargs='*', type=ipaddress.ip_network, default=[], help='Allow only IPs in these ranges')
@@ -29,7 +31,8 @@ filters_v4 = [ip for ip in args.allow_ranges if ip.version == 4]
 filters_v6 = [ip for ip in args.allow_ranges if ip.version == 6]
 
 def print_args():
-    print(f"Starting mDNS Discovery Proxy for {args.domain} on port {args.port}")
+    print(f"Starting mDNS Discovery Proxy for {args.domain}")
+    print(f"Listening on interface {args.interface} port {args.port} for incoming unicast DNS queries")
     print(f"DNS TTL: {args.ttl}, Query Timeout: {args.timeout}")
 
     suppress = []
@@ -250,8 +253,8 @@ def main():
 
     protocol = TruncatingDNSDatagramProtocol(controller=factory)
 
-    reactor.listenUDP(args.port, protocol)
-    reactor.listenTCP(args.port, factory)
+    reactor.listenUDP(args.port, protocol, interface=args.interface)
+    reactor.listenTCP(args.port, factory, interface=args.interface)
 
     log.startLogging(sys.stdout)
     reactor.run()

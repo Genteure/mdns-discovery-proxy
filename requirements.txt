@@ -1,2 +1,2 @@
-zeroconf
-twisted
+Twisted==25.5.0
+zeroconf==0.147.0
