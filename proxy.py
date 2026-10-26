@@ -135,11 +135,18 @@ class DynamicResolver(object):
             return answers, [], additional
 
         class listener(RecordUpdateListener):
-            def __init__(self):
+            def __init__(self, name):
+                self.name = name.lower()
                 self.raw_addr4s = set()
                 self.raw_addr6s = set()
                 self.time = time.time()
             def update_record(self, zc, now, record):
+                # zeroconf notifies every listener about every record update,
+                # regardless of the question the listener was registered with.
+                # Ignore records for other names, otherwise an unrelated A/AAAA
+                # heard during the lookup window can be returned as this name.
+                if record.name.lower() != self.name:
+                    return
                 if record.type == _TYPE_A and len(record.address) == 4:
                     self.raw_addr4s.add(socket.inet_ntop(socket.AF_INET, record.address))
                 if record.type == _TYPE_AAAA and len(record.address) == 16:
@@ -167,7 +174,7 @@ class DynamicResolver(object):
                 return [str(ip) for ip in ips]
 
         def host(localname):
-            l = listener()
+            l = listener(localname)
             q = DNSQuestion(localname, _TYPE_A, _CLASS_IN)
             self.zeroconf.add_listener(l, q)
             out = DNSOutgoing(_FLAGS_QR_QUERY)
@@ -188,7 +195,7 @@ class DynamicResolver(object):
             return answers, [], extra
 
         def host6(localname):
-            l = listener()
+            l = listener(localname)
             q = DNSQuestion(localname, _TYPE_AAAA, _CLASS_IN)
             self.zeroconf.add_listener(l, q)
             out = DNSOutgoing(_FLAGS_QR_QUERY)
