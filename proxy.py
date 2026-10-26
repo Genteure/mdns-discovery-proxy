@@ -5,6 +5,7 @@ import ipaddress
 import socket
 import sys
 import time
+import ifaddr
 from twisted.internet import reactor, defer, threads
 from twisted.names import client, dns, error, server
 from twisted.python import log
@@ -24,6 +25,7 @@ parser.add_argument('--log-level', type=int, choices=[0, 1, 2], default=1, help=
 
 parser.add_argument('--suppress-loopback', default=True, action=argparse.BooleanOptionalAction, help='Suppress loopback addresses (default: True)')
 parser.add_argument('--suppress-link-local', default=True, action=argparse.BooleanOptionalAction, help='Suppress link-local addresses (default: True)')
+parser.add_argument('--localhost-bypass', default=False, action=argparse.BooleanOptionalAction, help="Answer this host's own mDNS name from local interface addresses instead of querying mDNS (default: False)")
 
 args = parser.parse_args()
 
@@ -34,6 +36,8 @@ def print_args():
     print(f"Starting mDNS Discovery Proxy for {args.domain}")
     print(f"Listening on interface {args.interface} port {args.port} for incoming unicast DNS queries")
     print(f"DNS TTL: {args.ttl}, Query Timeout: {args.timeout}")
+    if args.localhost_bypass:
+        print("Answering this host's own mDNS name from local interface addresses")
 
     suppress = []
     if args.suppress_loopback:
@@ -56,9 +60,78 @@ def print_args():
 
 print_args()
 
+def filter_addresses(addresses, version):
+    """Apply the same suppression and range filters as normal mDNS answers."""
+    filters = filters_v4 if version == 4 else filters_v6
+    filtered = []
+    for address in addresses:
+        ip = ipaddress.ip_address(address)
+        if ip.is_loopback and args.suppress_loopback:
+            continue
+        if ip.is_link_local and args.suppress_link_local:
+            continue
+        if filters and not any(ip in network for network in filters):
+            continue
+        filtered.append(str(ip))
+    return filtered
+
+
+def get_local_addresses():
+    """Return the host's IPv4 and IPv6 addresses from all interfaces."""
+    ipv4, ipv6 = set(), set()
+    for adapter in ifaddr.get_adapters():
+        for ip in adapter.ips:
+            if ip.is_IPv6:
+                ipv6.add(ip.ip[0])
+            else:
+                ipv4.add(ip.ip)
+    return ipv4, ipv6
+
+
+class LocalHostBypass:
+    """Answer this host's own mDNS name from local interface addresses.
+
+    mDNS responders such as systemd-resolved drop queries that originate
+    from the local host, so a proxy running on the same machine cannot
+    resolve <hostname>.local through mDNS. When enabled, answer that name
+    directly from the host's interface addresses instead.
+    """
+
+    def __init__(self, hostname, ttl):
+        self.names = {f"{hostname.split('.', 1)[0]}.local.".lower()}
+        self.ttl = ttl
+
+    def _records(self, name, record_type, addresses):
+        record_class = dns.Record_A if record_type == dns.A else dns.Record_AAAA
+        return [
+            dns.RRHeader(name=name, ttl=self.ttl, type=record_type, payload=record_class(address))
+            for address in addresses
+        ]
+
+    def response(self, query, localname):
+        if localname.lower() not in self.names or query.type not in (dns.A, dns.AAAA):
+            return None
+
+        ipv4, ipv6 = get_local_addresses()
+        ipv4 = filter_addresses(ipv4, 4)
+        ipv6 = filter_addresses(ipv6, 6)
+
+        if query.type == dns.A:
+            answers = self._records(query.name.name, dns.A, ipv4)
+            extra = self._records(query.name.name, dns.AAAA, ipv6)
+        else:
+            answers = self._records(query.name.name, dns.AAAA, ipv6)
+            extra = self._records(query.name.name, dns.A, ipv4)
+
+        return answers, [], extra
+
+
 class DynamicResolver(object):
     def __init__(self):
         self.zeroconf = Zeroconf(ip_version=IPVersion.All)
+        self.local_bypass = None
+        if args.localhost_bypass:
+            self.local_bypass = LocalHostBypass(socket.gethostname(), args.ttl)
     
     def _dynamicResponseRequired(self, query):
         if str(query.name).endswith(args.domain):
@@ -71,6 +144,11 @@ class DynamicResolver(object):
             return defer.succeed(([], [], []))
         
         localname = str(query.name)[:-len(args.domain)] + "local."
+
+        if self.local_bypass is not None:
+            response = self.local_bypass.response(query, localname)
+            if response is not None:
+                return defer.succeed(response)
         
         def browse(localname):
             services = []
@@ -152,26 +230,12 @@ class DynamicResolver(object):
                 if record.type == _TYPE_AAAA and len(record.address) == 16:
                     self.raw_addr6s.add(socket.inet_ntop(socket.AF_INET6, record.address))
 
-            @staticmethod
-            def _is_suppressed(ip: (ipaddress.IPv4Address | ipaddress.IPv6Address)) -> bool:
-                if ip.is_loopback and args.suppress_loopback:
-                    return True
-                if ip.is_link_local and args.suppress_link_local:
-                    return True
-                return False
-
             @property
             def ipv4_addresses(self) -> list[str]:
-                ips = [ip for ip in map(ipaddress.ip_address, self.raw_addr4s) if not self._is_suppressed(ip)]
-                if filters_v4:
-                    ips = [ip for ip in ips if any(ip in net for net in filters_v4)]
-                return [str(ip) for ip in ips]
+                return filter_addresses(self.raw_addr4s, 4)
             @property
             def ipv6_addresses(self) -> list[str]:
-                ips = [ip for ip in map(ipaddress.ip_address, self.raw_addr6s) if not self._is_suppressed(ip)]
-                if filters_v6:
-                    ips = [ip for ip in ips if any(ip in net for net in filters_v6)]
-                return [str(ip) for ip in ips]
+                return filter_addresses(self.raw_addr6s, 6)
 
         def host(localname):
             l = listener(localname)

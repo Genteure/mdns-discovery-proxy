@@ -19,6 +19,15 @@ ptr-record=lb._dns-sd._udp.example.com,home.arpa
 ptr-record=db._dns-sd._udp.example.com,home.arpa
 ```
 
+### Local host names
+
+mDNS responders such as systemd-resolved drop queries that originate from the
+local host, so a proxy running on the same machine cannot resolve that
+machine's own `<hostname>.local` name through mDNS. Start the proxy with
+`--localhost-bypass` to answer A/AAAA queries for the local hostname directly
+from the machine's interface addresses. The normal `--allow-ranges`, loopback,
+and link-local filters still apply.
+
 To check whether it is working, you can try some of the following queries (assuming your computer is named _yourcomputer_ and advertises an SSH service):
 ```bash
 dig yourcomputer.home.arpa
